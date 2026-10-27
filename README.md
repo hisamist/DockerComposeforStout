@@ -136,13 +136,13 @@ Stoat est découpé en **microservices** qui partagent la même configuration (`
 Un seul programme connecté aux **deux plateformes à la fois** :
 
 ```
-          Discord                          stoatcord-bot                            Stoat
- ┌─────────────────────┐   Gateway   ┌──────────────────────────┐   REST :14702  ┌──────────┐
- │ #salon Discord      │◄───────────►│ client Discord (discord.js) │──────────────►│ api      │
- │                     │◄── webhook ─│ relais + conversion format │   WS :14703    │          │
- └─────────────────────┘             │ base SQLite (liens, IDs)   │◄──────────────│ events   │
-                                     │ API HTTP :3210 (/health)   │               └──────────┘
-                                     └──────────────────────────┘
+       Discord                       stoatcord-bot                       Stoat
+ ┌────────────────┐  Gateway  ┌─────────────────────────────┐  REST :14702  ┌────────┐
+ │ #salon Discord │◄─────────►│ client Discord (discord.js) │──────────────►│ api    │
+ │                │◄─ webhook─│ relais + conversion format  │   WS :14703   │        │
+ └────────────────┘           │ base SQLite (liens, IDs)    │◄──────────────│ events │
+                              │ API HTTP :3210 (/health)    │               └────────┘
+                              └─────────────────────────────┘
 ```
 
 | Élément | Rôle |
@@ -161,11 +161,126 @@ Un seul programme connecté aux **deux plateformes à la fois** :
 - **Mode normal** : il parle à `api` et `events` **directement par le DNS Docker**, sur le réseau `backend`, sans passer par Caddy. Il n'a **aucun accès** aux bases (`data`).
 - **Mode distant** : il parle au backend de l'autre PC par le **tunnel WireGuard**, via le réseau `egress`.
 
+Le fonctionnement détaillé du bridge est décrit au [§2 ter](#2-ter-le-bridge-en-détail).
+
 ### Mode distant : partage réseau par WireGuard
 - **WireGuard** crée sur chaque PC une **carte réseau virtuelle** (ici `10.8.0.3` pour ce PC, `10.8.0.1` pour le PC backend), reliée aux autres par un **tunnel chiffré**. Seuls les pairs dont la clé publique est connue peuvent y entrer.
 - Un conteneur ne connaît pas WireGuard. Le trafic part du réseau Docker `egress`, sort par Windows, et Windows l'envoie dans le tunnel pour les adresses `10.8.0.x`. C'est pour ça que le bridge doit être sur un réseau **non-internal** pour joindre le PC distant.
 - **Ce qui traverse le tunnel :** l'API (REST), le WebSocket, Autumn et LiveKit du PC distant.
 - **Ce qui ne le traverse jamais :** les bases de données, qui restent internes au PC backend.
+
+---
+
+## 2 ter. Le bridge en détail
+
+### Pourquoi `stoatcord-bot`
+Le cahier des charges porte sur l'**infrastructure** : le bridge est donc un projet open-source existant, [tribixbite/stoatcord-bot](https://github.com/tribixbite/stoatcord-bot), figé au commit `9ccb0ea`. Il gère déjà les modifications, les suppressions, les réactions et la reprise après coupure. **Son code n'est pas modifié.** Notre travail se trouve autour de lui :
+
+| Ajout | Fichier | Pourquoi |
+|---|---|---|
+| Image multi-stage `deps` → `dev` / `runtime` distroless non-root | `bot/docker/Dockerfile` | l'image amont n'est ni durcie ni prévue pour le développement |
+| Chargeur de secrets `XXX_FILE` → `XXX` | `bot/docker/entrypoint.ts` | le bot amont ne lit que des variables d'environnement, et les tokens ne doivent pas y apparaître en clair |
+| Raccordement au Stoat **auto-hébergé** par le DNS Docker | `compose/bridge.yaml` | par défaut, le bot vise l'instance publique `stoat.chat` |
+| Réseaux `backend` + `egress`, limites cgroup, `read_only`, `cap_drop` | `compose/bridge.yaml` | le bot n'accède ni aux bases ni au reste de la stack |
+| Redémarrage lié à `api` et `events` (`depends_on … restart: true`) | `compose/bridge.yaml` | le bot se reconnecte proprement quand le backend redémarre |
+
+### Configuration du service
+| Variable | Valeur | Rôle |
+|---|---|---|
+| `DISCORD_TOKEN_FILE` | `/run/secrets/discord_token` | token du bot Discord |
+| `STOAT_TOKEN_FILE` | `/run/secrets/stoat_token` | token du bot Stoat (créé dans *Paramètres → Mes bots*) |
+| `API_KEY_FILE` | `/run/secrets/bridge_api_key` | protège l'API HTTP du bridge (généré par `setup.sh`) |
+| `STOAT_API_BASE` | `http://api:14702` | API REST, jointe **directement**, sans passer par Caddy |
+| `STOAT_WS_URL` | `ws://events:14703` | WebSocket temps réel |
+| `STOAT_CDN_URL`, `STOAT_AUTUMN_URL` | `http://autumn:14704` | téléchargement et envoi des pièces jointes |
+| `PUSH_ENABLED` | `false` | relais de notifications push désactivé (il faudrait un compte Firebase) |
+
+Les données (salons liés, correspondance des messages) sont dans une base SQLite, sur le volume `bridge_data` monté sur `/data`. Elles survivent donc à la reconstruction de l'image.
+
+### Trajet d'un message
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor A as Alice (Discord)
+    participant D as Discord
+    participant B as stoatcord-bot
+    participant DB as SQLite
+    participant S as Stoat (api / events)
+    actor C as Bob (Stoat)
+
+    A->>D: écrit « salut » dans #général
+    D->>B: événement messageCreate (Gateway)
+    B->>DB: #général est lié à quel salon Stoat ?
+    B->>B: conversion du markdown (spoilers, mentions, emojis)
+    B->>S: POST /channels/:id/messages + masquerade (nom et avatar d'Alice)
+    S->>C: le message s'affiche « Alice : salut »
+    B->>DB: enregistre la paire d'IDs Discord ↔ Stoat
+
+    C->>S: répond « bonjour »
+    S->>B: événement Message (WebSocket events)
+    B->>DB: salon Discord lié + webhook de ce salon
+    B->>D: exécution du webhook (nom et avatar de Bob)
+    D->>A: le message s'affiche « Bob : bonjour »
+    B->>DB: enregistre la paire d'IDs Stoat ↔ Discord
+```
+
+**Discord → Stoat**
+1. Le bot reçoit le message par la **Gateway** Discord. Il faut l'intent *Message Content* pour avoir son texte.
+2. Il cherche le salon Stoat lié dans `channel_links`. Si le salon n'est pas lié, le message est ignoré.
+3. Il convertit le format : spoilers `||texte||` → `!!texte!!`, emojis personnalisés `<:nom:id>` → `:nom:`, horodatages `<t:…>` → date UTC. Les mentions deviennent `@discord-user` / `#discord-channel`, car les IDs Discord n'existent pas côté Stoat.
+4. Les **pièces jointes** sont téléchargées puis renvoyées vers **Autumn**. Au-delà de 20 Mo, seul le lien est ajouté au texte.
+5. Il publie avec `masquerade` : le message vient techniquement du bot Stoat, mais s'affiche avec le nom et l'avatar de l'auteur Discord. Le texte est coupé à 2 000 caractères.
+
+**Stoat → Discord**
+1. Le bot reçoit le message par le **WebSocket** d'`events`. En secours, il interroge aussi l'API toutes les 5 s : si le WebSocket perd un événement, le message est quand même relayé, et un ensemble d'IDs déjà traités évite les doublons.
+2. Il convertit le format dans l'autre sens (`!!texte!!` → `||texte||`, mentions Stoat → `@stoat-user`).
+3. Il publie par le **webhook** du salon Discord, créé au moment du `/link`. Un bot Discord ne peut pas changer son nom à chaque message, alors qu'un webhook le peut. Les pièces jointes sont lues dans Autumn par le réseau interne puis envoyées à Discord.
+
+**Modifications, suppressions et réactions** suivent le même chemin. Grâce à la table `bridge_messages`, le bot retrouve le message correspondant de l'autre côté pour le modifier ou le supprimer. L'indicateur « en train d'écrire » est relayé au plus une fois toutes les 5 s par utilisateur.
+
+### Anti-écho : éviter la boucle infinie
+Sans protection, un message relayé vers Stoat serait vu par le bot comme un nouveau message Stoat, renvoyé vers Discord, puis de nouveau vers Stoat, et ainsi de suite. Trois protections l'empêchent (`src/bridge/relay.ts`) :
+
+| Protection | Côté | Principe |
+|---|---|---|
+| Filtre sur l'auteur | Discord | les messages de bots et de webhooks (`message.author.bot`) sont ignorés, donc ceux que le bridge publie aussi |
+| Filtre `masquerade` | Stoat | un message avec `masquerade` vient forcément du bridge : il est ignoré |
+| IDs récents en mémoire | les deux | chaque ID relayé est mémorisé 60 s (10 s pour les modifications, suppressions et réactions). Un événement sur un ID connu est ignoré |
+
+Une conséquence : **un seul bridge doit utiliser un même token Discord à la fois.** Deux instances relaieraient chaque message deux fois. C'est pour ça que `make local`, `make remote` et `make prod` arrêtent d'abord l'autre bridge.
+
+### Reprise après coupure
+Pour chaque salon lié, le bot garde l'ID du **dernier message relayé** dans chaque sens. Au démarrage, il demande à chaque plateforme les messages postés après cet ID, au plus 100 par salon, et les relaie dans l'ordre. Leur nom porte alors le suffixe `[delayed]`, et les pièces jointes passent en simple lien pour ne pas saturer Autumn.
+
+### Commandes Discord
+| Commande | Permission requise | Effet |
+|---|---|---|
+| `/link stoat_channel_id:<ID>` | Gérer les salons | lie le salon courant à un salon Stoat et crée le webhook |
+| `/unlink` | Gérer les salons | supprime le lien du salon courant |
+| `/status` | — | lien serveur Discord ↔ serveur Stoat et liste des salons liés |
+| `/unlink-server confirm:true` | Administrateur | supprime le lien entre le serveur Discord et le serveur Stoat, et tous les liens de salons |
+| `/migrate` | Administrateur | copie la structure du serveur Discord (salons, rôles, emojis) vers un serveur Stoat, avec `dry_run` pour prévisualiser |
+| `/archive start` / `status` / `pause` / `resume` | Administrateur | exporte l'historique d'un salon Discord, et peut l'importer dans un salon Stoat |
+| `/token` | Administrateur | affiche ou régénère le jeton de l'API d'archive de ce serveur |
+
+L'ID d'un salon Stoat (26 caractères, format ULID) se trouve dans l'URL du salon : `/server/<ID serveur>/channel/<ID salon>`.
+
+### Vérifier et diagnostiquer
+```bash
+make ps                       # stoatcord-bot doit être "healthy"
+make logs s=stoatcord-bot     # [stoat-ws] Subscribed to server…, [recovery] …, erreurs de relais
+```
+Sur Discord, `/status` liste les salons effectivement liés.
+
+| Symptôme | Cause probable |
+|---|---|
+| Discord → Stoat : messages vides ou absents | intent **Message Content** non activé dans le portail développeur Discord |
+| Discord → Stoat : erreur de permission dans les logs | le bot Stoat n'a pas la permission **Masquerade**, ou n'est pas membre du serveur |
+| Stoat → Discord : rien n'arrive | pas de permission *Manage Webhooks*, donc le webhook n'a pas été créé au `/link` |
+| Chaque message arrive deux fois | deux bridges tournent avec le même token (`make local` ou `make remote` pour n'en garder qu'un) |
+| Avatars Stoat absents sur Discord | normal en local : Discord ne peut pas télécharger une image sur `localhost` (voir *Limites connues*) |
+| Conteneur `unhealthy` | `/api/health` ne répond pas : un token est invalide, ou `api` / `events` ne sont pas encore prêts |
 
 ---
 
@@ -323,6 +438,10 @@ docker compose -f docker-compose.yaml config       # configuration finale (fragm
 projetBridge/
 ├── docker-compose.yaml            # stack de production
 ├── docker-compose.override.yaml   # stack de développement
+├── compose/                      # modules (include: dans docker-compose.yaml ; common.yaml via extends:)
+│   ├── common.yaml  stoat.yaml  data.yaml
+│   ├── bridge.yaml                #   service stoatcord-bot (§2 ter)
+│   └── monitoring.yaml
 ├── setup.sh                       # installation
 ├── .env.example                   # modèle des variables
 ├── config/                        # configuration commune, sans URL ni secret

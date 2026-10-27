@@ -76,20 +76,28 @@ build-web:
 	$(PROD) build web
 
 # --- Démarrage ---------------------------------------------------------------
+# prod, dev et up démarrent la stack locale COMPLÈTE, bridge local compris :
+# on arrête d'abord le bridge distant (même token Discord, un seul à la fois).
+# Le "-" ignore l'erreur si le mode distant n'est pas configuré.
 prod:
+	-$(REMOTE) stop stoatcord-bot
 	$(PROD) up -d
 
 dev:
+	-$(REMOTE) stop stoatcord-bot
 	$(DEV) up --watch
 
 up:
+	-$(REMOTE) stop stoatcord-bot
 	$(DEV) up -d
 
+# Ne démarrent QUE leurs propres services (et leurs dépendances) : le bridge
+# n'est pas touché, quel que soit le mode actif.
 monitoring:
-	$(DEV) --profile monitoring up -d
+	$(DEV) --profile monitoring up -d cadvisor prometheus grafana
 
 tools:
-	$(DEV) --profile tools up -d
+	$(DEV) --profile tools up -d mongo-express
 
 # --- Bascule du bridge (toujours arrêter l'autre mode d'abord) ---------------
 local:
