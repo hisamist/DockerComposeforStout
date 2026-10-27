@@ -1,0 +1,22 @@
+# =============================================================================
+#  Configuration Stoat COMMUNE à toutes les installations (versionnée).
+#  Tout ce qui dépend de l'instance (domaine, mots de passe, clés) est injecté
+#  par variables d'environnement REVOLT__SECTION__CLE depuis docker-compose.yaml :
+#  ce fichier ne contient ni URL ni secret.
+#  Valeurs par défaut complètes : stoat/backend/crates/core/config/Revolt.toml
+# =============================================================================
+
+# Nœud LiveKit (voix/vidéo) joint par l'API sur le réseau interne
+[api.livekit.nodes.worldwide]
+url = "http://livekit:7880"
+lat = 0.0
+lon = 0.0
+
+# Vidéo et partage d'écran jusqu'en 1080p
+[features.limits.new_user]
+video_resolution = [1920, 1080]
+video_aspect_ratio = [0.3, 10]
+
+[features.limits.default]
+video_resolution = [1920, 1080]
+video_aspect_ratio = [0.3, 10]

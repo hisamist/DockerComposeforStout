@@ -1,0 +1,41 @@
+# =============================================================================
+#  Module BRIDGE : passerelle Discord <-> Stoat
+#  Image maison multi-stage (voir bot/docker/Dockerfile), sources dans bot/stoatcord-bot.
+# =============================================================================
+services:
+  stoatcord-bot:
+    extends: { file: compose/common.yaml, service: hardened }
+    image: projetbridge/stoatcord-bot:latest
+    build:
+      context: ./bot/stoatcord-bot
+      dockerfile: ../docker/Dockerfile
+      target: runtime
+      additional_contexts:
+        bridge: ./bot/docker
+    init: true
+    environment:
+      DISCORD_TOKEN_FILE: /run/secrets/discord_token
+      STOAT_TOKEN_FILE: /run/secrets/stoat_token
+      API_KEY_FILE: /run/secrets/bridge_api_key
+      # Le bridge parle directement aux services internes (DNS Docker), sans passer par Caddy
+      STOAT_API_BASE: http://api:14702
+      STOAT_WS_URL: ws://events:14703
+      STOAT_CDN_URL: http://autumn:14704
+      STOAT_AUTUMN_URL: http://autumn:14704
+      PUSH_ENABLED: "false"
+    secrets: [discord_token, stoat_token, bridge_api_key]
+    volumes:
+      - bridge_data:/data
+    # "backend" pour joindre Stoat, "egress" pour joindre Discord. Aucun accès à "data".
+    networks: [backend, egress]
+    deploy:
+      resources:
+        limits: { cpus: "1.0", memory: 512M, pids: 256 }
+    # Sonde définie dans l'image (HEALTHCHECK sur /api/health), rythme commun conservé
+    healthcheck:
+      test: ["CMD", "bun", "-e", "const r = await fetch('http://127.0.0.1:3210/api/health'); process.exit(r.ok ? 0 : 1)"]
+      interval: 30s
+    depends_on:
+      # Reconnexion propre si l'API ou le serveur WebSocket redémarre
+      api: { condition: service_healthy, restart: true }
+      events: { condition: service_healthy, restart: true }

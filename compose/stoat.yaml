@@ -1,0 +1,219 @@
+# =============================================================================
+#  Module STOAT : backend Rust, voix/vidéo, client web, reverse proxy
+#  Backend et client web compilés depuis stoat/backend et stoat/web.
+# =============================================================================
+services:
+  # ---------------------------------------------------------------------------
+  #  Backend (images distroless nonroot, une cible de build par service)
+  # ---------------------------------------------------------------------------
+  api:
+    extends: { file: compose/common.yaml, service: stoat }
+    image: projetbridge/stoat-api:${STOAT_VERSION:-v0.15.5}
+    build: { target: api }
+    networks: [edge, backend, data]
+    deploy:
+      resources:
+        limits: { cpus: "1.0", memory: 512M, pids: 256 }
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/busybox", "nc", "-z", "127.0.0.1", "14702"]
+    depends_on:
+      database: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      rabbit: { condition: service_healthy }
+
+  # Sidecar : partage l'espace réseau de l'API et relaie son 127.0.0.1:80 vers Caddy.
+  # L'API appelle January via l'URL publique (http://stoat.localhost/january) pour générer
+  # les aperçus de liens. Or libcurl résout tout *.localhost en 127.0.0.1 (RFC 6761), donc
+  # vers le conteneur de l'API lui-même. Ce relais renvoie ces appels vers Caddy.
+  api-loopback:
+    extends: { file: compose/common.yaml, service: hardened }
+    image: docker.io/alpine/socat:1.8.0.3
+    cap_add: [NET_BIND_SERVICE]
+    network_mode: service:api
+    command: TCP-LISTEN:80,bind=127.0.0.1,fork,reuseaddr TCP:caddy:80
+    deploy:
+      resources:
+        limits: { cpus: "0.25", memory: 64M, pids: 64 }
+    healthcheck:
+      test: ["CMD", "nc", "-z", "127.0.0.1", "80"]
+    depends_on:
+      # Partage l'espace réseau de l'API : doit redémarrer avec elle
+      api: { condition: service_healthy, restart: true }
+
+  events:
+    extends: { file: compose/common.yaml, service: stoat }
+    image: projetbridge/stoat-events:${STOAT_VERSION:-v0.15.5}
+    build: { target: events }
+    networks: [edge, backend, data]
+    deploy:
+      resources:
+        limits: { cpus: "0.50", memory: 256M, pids: 128 }
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/busybox", "nc", "-z", "127.0.0.1", "14703"]
+    depends_on:
+      database: { condition: service_healthy }
+      redis: { condition: service_healthy }
+
+  autumn:
+    extends: { file: compose/common.yaml, service: stoat }
+    image: projetbridge/stoat-file-server:${STOAT_VERSION:-v0.15.5}
+    build: { target: file-server }
+    networks: [edge, backend, data]
+    deploy:
+      resources:
+        limits: { cpus: "1.0", memory: 512M, pids: 256 }
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/busybox", "nc", "-z", "127.0.0.1", "14704"]
+    depends_on:
+      database: { condition: service_healthy }
+      createbuckets: { condition: service_completed_successfully }
+
+  # Proxy d'aperçus de liens : a besoin d'Internet, pas des bases
+  january:
+    extends: { file: compose/common.yaml, service: stoat }
+    image: projetbridge/stoat-proxy:${STOAT_VERSION:-v0.15.5}
+    build: { target: proxy }
+    networks: [edge]
+    deploy:
+      resources:
+        limits: { cpus: "0.50", memory: 256M, pids: 128 }
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/busybox", "nc", "-z", "127.0.0.1", "14705"]
+
+  gifbox:
+    extends: { file: compose/common.yaml, service: stoat }
+    image: projetbridge/stoat-gifbox:${STOAT_VERSION:-v0.15.5}
+    build: { target: gifbox }
+    networks: [edge]
+    deploy:
+      resources:
+        limits: { cpus: "0.25", memory: 128M, pids: 64 }
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/busybox", "nc", "-z", "127.0.0.1", "14706"]
+
+  # Démons sans port : la sonde vérifie que le processus tourne
+  crond:
+    extends: { file: compose/common.yaml, service: stoat }
+    image: projetbridge/stoat-crond:${STOAT_VERSION:-v0.15.5}
+    build: { target: crond }
+    networks: [data]
+    deploy:
+      resources:
+        limits: { cpus: "0.25", memory: 128M, pids: 64 }
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/busybox", "pidof", "revolt-crond"]
+    depends_on:
+      database: { condition: service_healthy }
+      minio: { condition: service_healthy }
+
+  pushd:
+    extends: { file: compose/common.yaml, service: stoat }
+    image: projetbridge/stoat-pushd:${STOAT_VERSION:-v0.15.5}
+    build: { target: pushd }
+    # Envoie les notifications Web Push vers Internet
+    networks: [data, egress]
+    deploy:
+      resources:
+        limits: { cpus: "0.25", memory: 128M, pids: 64 }
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/busybox", "pidof", "revolt-pushd"]
+    depends_on:
+      database: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      rabbit: { condition: service_healthy }
+
+  voice-ingress:
+    extends: { file: compose/common.yaml, service: stoat }
+    image: projetbridge/stoat-voice-ingress:${STOAT_VERSION:-v0.15.5}
+    build: { target: voice-ingress }
+    networks: [edge, backend, data]
+    deploy:
+      resources:
+        limits: { cpus: "0.25", memory: 128M, pids: 64 }
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/busybox", "nc", "-z", "127.0.0.1", "8500"]
+    depends_on:
+      database: { condition: service_healthy }
+      rabbit: { condition: service_healthy }
+
+  # ---------------------------------------------------------------------------
+  #  Voix / vidéo
+  # ---------------------------------------------------------------------------
+  livekit:
+    extends: { file: compose/common.yaml, service: hardened }
+    image: ghcr.io/stoatchat/livekit-server:v1.9.14
+    command: --config /etc/livekit.yml
+    environment:
+      # Clé API LiveKit "stoat" (même secret que REVOLT__API__LIVEKIT__NODES__WORLDWIDE__SECRET)
+      LIVEKIT_KEYS: "stoat: ${LIVEKIT_SECRET}"
+    # Plage UDP WebRTC déplacée (50000-50100 par défaut) : Windows réserve 50000-50059.
+    # Doit correspondre à port_range_start/end de config/livekit.yml
+    ports:
+      - "7881:7881"
+      - "41000-41100:41000-41100/udp"
+    volumes:
+      - ./config/livekit.yml:/etc/livekit.yml:ro
+    networks: [edge, backend, data]
+    deploy:
+      resources:
+        limits: { cpus: "1.0", memory: 512M, pids: 256 }
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:7880/"]
+    depends_on:
+      redis: { condition: service_healthy }
+
+  # ---------------------------------------------------------------------------
+  #  Client web et point d'entrée HTTP(S)
+  # ---------------------------------------------------------------------------
+  # Client web compilé depuis stoat/web (voir docker/stoat-web/Dockerfile)
+  web:
+    extends: { file: compose/common.yaml, service: hardened }
+    image: projetbridge/stoat-web:${STOAT_WEB_VERSION:-v0.15.3}
+    build:
+      context: ./stoat/web
+      dockerfile: ../../docker/stoat-web/Dockerfile
+      target: runtime
+    # L'injection des URLs au démarrage écrit une copie du site dans /tmp
+    tmpfs: !override
+      - /tmp:size=256m,uid=1000,gid=1000
+    environment:
+      VITE_HOST: ${STOAT_DOMAIN}
+      VITE_API_URL: ${STOAT_PUBLIC_URL}/api
+      VITE_DEV_GIFBOX_URL: ${STOAT_PUBLIC_URL}/gifbox
+    networks: [edge]
+    deploy:
+      resources:
+        limits: { cpus: "1.0", memory: 512M, pids: 256 }
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:5000/"]
+
+  caddy:
+    extends: { file: compose/common.yaml, service: hardened }
+    image: docker.io/caddy:2
+    # Seule capacité rendue : écouter sur les ports 80/443
+    cap_add: [NET_BIND_SERVICE]
+    environment:
+      # http://... -> HTTP seul ; https://... -> HTTPS automatique (Let's Encrypt)
+      SITE_ADDRESS: ${STOAT_PUBLIC_URL}
+      PUBLIC_URL: ${STOAT_PUBLIC_URL}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./config/Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./data/caddy-data:/data
+      - ./data/caddy-config:/config
+    networks:
+      edge:
+        aliases:
+          # Le domaine public désigne Caddy aussi depuis l'intérieur de Docker
+          - "${STOAT_DOMAIN:-localhost}"
+    deploy:
+      resources:
+        limits: { cpus: "0.50", memory: 256M, pids: 128 }
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:2019/config/"]
+    depends_on:
+      api: { condition: service_healthy }
+      events: { condition: service_healthy }
+      web: { condition: service_healthy }

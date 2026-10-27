@@ -1,0 +1,22 @@
+# Serveur LiveKit (voix/vidéo WebRTC)
+# La clé API est fournie par la variable LIVEKIT_KEYS ("stoat: <secret>")
+# définie dans docker-compose.yaml : aucun secret dans ce fichier.
+rtc:
+  use_external_ip: true
+  # Plage UDP déplacée (défaut 50000-50100) : Windows réserve 50000-50059.
+  # Doit correspondre aux ports publiés dans docker-compose.yaml.
+  port_range_start: 41000
+  port_range_end: 41100
+  tcp_port: 7881
+
+redis:
+  address: redis:6379
+
+turn:
+  enabled: false
+
+# Événements des salons vocaux renvoyés à Stoat
+webhook:
+  api_key: stoat
+  urls:
+    - "http://voice-ingress:8500/worldwide"

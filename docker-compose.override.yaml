@@ -1,0 +1,88 @@
+# =============================================================================
+#  Stack de DÉVELOPPEMENT : chargée automatiquement par `docker compose`
+#  en plus de docker-compose.yaml.
+#    docker compose up --watch                  -> dev + rechargement à chaud
+#                                                  (client web via Vite HMR, bridge via bun --watch)
+#    docker compose --profile tools up -d       -> + mongo-express (http://127.0.0.1:8081)
+#  Pour la production, l'ignorer : docker compose -f docker-compose.yaml up -d
+# =============================================================================
+
+networks:
+  # Réseau non-internal, nécessaire pour publier des ports d'outils sur 127.0.0.1
+  devtools: {}
+
+services:
+  # Base accessible depuis l'hôte UNIQUEMENT (127.0.0.1) pour Compass / mongosh
+  database:
+    ports:
+      - "127.0.0.1:27017:27017"
+    networks: [data, devtools]
+
+  # Logs détaillés côté API
+  api:
+    environment:
+      RUST_LOG: debug
+
+  # Client web : étape "dev" (serveur Vite) au lieu du site compilé.
+  # Une modification dans stoat/web/packages/client/src apparaît dans le navigateur
+  # sans rechargement de page (HMR, WebSocket relayé par Caddy).
+  web:
+    build:
+      target: dev
+    image: projetbridge/stoat-web:dev
+    read_only: false
+    environment:
+      VITE_HOST: ${STOAT_DOMAIN}
+      VITE_API_URL: ${STOAT_PUBLIC_URL}/api
+      VITE_DEV_GIFBOX_URL: ${STOAT_PUBLIC_URL}/gifbox
+    deploy:
+      resources:
+        limits: { cpus: "2.0", memory: 2G, pids: 512 }
+    healthcheck:
+      start_period: 90s
+    develop:
+      watch:
+        - action: sync
+          path: ./stoat/web/packages/client/src
+          target: /build/packages/client/src
+        - action: rebuild
+          path: ./stoat/web/packages/client/package.json
+        - action: rebuild
+          path: ./docker/stoat-web/Dockerfile
+
+  # Bot : étape "dev" du Dockerfile multi-stage (toutes les dépendances, bun --watch)
+  stoatcord-bot:
+    build:
+      target: dev
+    image: projetbridge/stoatcord-bot:dev
+    read_only: false
+    develop:
+      watch:
+        # Code source modifié -> copié dans le conteneur, bun --watch recharge tout seul
+        - action: sync
+          path: ./bot/stoatcord-bot/src
+          target: /app/src
+        - action: sync
+          path: ./bot/docker/entrypoint.ts
+          target: /app/entrypoint.ts
+        # Dépendances ou Dockerfile modifiés -> reconstruction de l'image
+        - action: rebuild
+          path: ./bot/stoatcord-bot/package.json
+        - action: rebuild
+          path: ./bot/docker/Dockerfile
+
+  # Interface web d'administration MongoDB (profil optionnel "tools")
+  mongo-express:
+    profiles: [tools]
+    image: docker.io/mongo-express:1.0.2
+    restart: unless-stopped
+    environment:
+      ME_CONFIG_MONGODB_URL: mongodb://${MONGO_ROOT_USER}:${MONGO_ROOT_PASSWORD}@database:27017/?authSource=admin
+      ME_CONFIG_BASICAUTH_ENABLED: "true"
+      ME_CONFIG_BASICAUTH_USERNAME: admin
+      ME_CONFIG_BASICAUTH_PASSWORD: ${MONGO_ROOT_PASSWORD}
+    ports:
+      - "127.0.0.1:8081:8081"
+    networks: [data, devtools]
+    depends_on:
+      database: { condition: service_healthy }

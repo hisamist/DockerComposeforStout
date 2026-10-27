@@ -1,0 +1,108 @@
+# =============================================================================
+#  Module DONNÉES : MongoDB, Valkey (Redis), RabbitMQ, MinIO
+#  Tous sur le réseau "data" (internal) : ni port publié, ni accès Internet.
+# =============================================================================
+services:
+  database:
+    extends: { file: compose/common.yaml, service: base }
+    image: docker.io/mongo:8
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_ROOT_USER}
+      MONGO_INITDB_ROOT_PASSWORD_FILE: /run/secrets/mongo_root_password
+      MONGO_APP_USER: ${MONGO_APP_USER}
+      MONGO_APP_PASSWORD: ${MONGO_APP_PASSWORD}
+    secrets: [mongo_root_password]
+    volumes:
+      - ./data/db:/data/db
+      - ./docker/mongo/init-app-user.js:/docker-entrypoint-initdb.d/init-app-user.js:ro
+    networks: [data]
+    # Cgroups : la base est protégée en priorité si la mémoire vient à manquer
+    oom_score_adj: -500
+    ulimits:
+      nofile: { soft: 64000, hard: 64000 }
+    deploy:
+      resources:
+        limits: { cpus: "1.5", memory: 1G, pids: 512 }
+        reservations: { memory: 256M }
+    healthcheck:
+      test: ["CMD-SHELL", "echo 'db.runCommand(\"ping\").ok' | mongosh localhost:27017/test --quiet"]
+
+  redis:
+    extends: { file: compose/common.yaml, service: base }
+    image: docker.io/valkey/valkey:9-alpine
+    networks: [data]
+    deploy:
+      resources:
+        limits: { cpus: "0.50", memory: 256M, pids: 128 }
+    healthcheck:
+      test: ["CMD", "valkey-cli", "ping"]
+
+  rabbit:
+    extends: { file: compose/common.yaml, service: base }
+    image: docker.io/rabbitmq:4
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBIT_USER}
+      RABBITMQ_DEFAULT_PASS: ${RABBIT_PASSWORD}
+    volumes:
+      - ./data/rabbit:/var/lib/rabbitmq
+    networks: [data]
+    deploy:
+      resources:
+        limits: { cpus: "1.0", memory: 512M, pids: 256 }
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      start_period: 30s
+
+  minio:
+    extends: { file: compose/common.yaml, service: base }
+    image: docker.io/pgsty/silo
+    command: server /data
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+      MINIO_DOMAIN: minio
+    volumes:
+      - ./data/minio:/data
+    networks:
+      data:
+        aliases:
+          - revolt-uploads.minio
+          # alias historiques des anciens buckets
+          - attachments.minio
+          - avatars.minio
+          - backgrounds.minio
+          - icons.minio
+          - banners.minio
+          - emojis.minio
+    deploy:
+      resources:
+        limits: { cpus: "1.0", memory: 512M, pids: 256 }
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:9000/minio/health/live"]
+
+  # Tâche d'initialisation (s'exécute puis s'arrête) : crée le bucket et un compte
+  # de service à droits limités pour Autumn. Le compte root MinIO reste hors de l'application.
+  createbuckets:
+    extends: { file: compose/common.yaml, service: base }
+    image: docker.io/pgsty/mc
+    restart: "no"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+      MINIO_APP_USER: ${MINIO_APP_USER}
+      MINIO_APP_PASSWORD: ${MINIO_APP_PASSWORD}
+    entrypoint: >
+      /bin/sh -ec "
+      mc alias set minio http://minio:9000 $$MINIO_ROOT_USER $$MINIO_ROOT_PASSWORD;
+      mc mb --ignore-existing minio/revolt-uploads;
+      mc admin user add minio $$MINIO_APP_USER $$MINIO_APP_PASSWORD;
+      mc admin policy attach minio readwrite --user $$MINIO_APP_USER || true;
+      "
+    networks: [data]
+    deploy:
+      resources:
+        limits: { cpus: "0.25", memory: 128M, pids: 64 }
+    healthcheck:
+      disable: true
+    depends_on:
+      minio: { condition: service_healthy }

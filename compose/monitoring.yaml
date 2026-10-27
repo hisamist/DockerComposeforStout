@@ -1,0 +1,81 @@
+# =============================================================================
+#  Module SUPERVISION (profil "monitoring", optionnel)
+#    docker compose --profile monitoring up -d   -> Grafana sur http://127.0.0.1:3000
+#  cAdvisor lit les cgroups de chaque conteneur, Prometheus stocke les mesures,
+#  Grafana affiche la consommation réelle face aux limites fixées dans la stack.
+# =============================================================================
+services:
+  cadvisor:
+    extends: { file: compose/common.yaml, service: base }
+    profiles: [monitoring]
+    image: ghcr.io/google/cadvisor:v0.60.6
+    # Lecture des cgroups et des métadonnées Docker de l'hôte : accès privilégié requis,
+    # compensé par un réseau internal et aucun port publié.
+    privileged: true
+    devices:
+      - /dev/kmsg
+    command:
+      - --docker_only=true
+      - --housekeeping_interval=10s
+      - --store_container_labels=false
+      - --whitelisted_container_labels=com.docker.compose.project,com.docker.compose.service
+      - --enable_metrics=cpu,memory,network,process
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+    networks: [monitoring]
+    deploy:
+      resources:
+        limits: { cpus: "0.50", memory: 256M, pids: 128 }
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/healthz"]
+
+  prometheus:
+    extends: { file: compose/common.yaml, service: hardened }
+    profiles: [monitoring]
+    image: docker.io/prom/prometheus:v3.5.0
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=7d
+    volumes:
+      - ./config/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    # "monitoring" pour cAdvisor et Grafana, "backend" pour les métriques de l'API Stoat
+    networks: [monitoring, backend]
+    deploy:
+      resources:
+        limits: { cpus: "0.50", memory: 512M, pids: 128 }
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:9090/-/healthy"]
+    depends_on:
+      cadvisor: { condition: service_healthy }
+
+  grafana:
+    extends: { file: compose/common.yaml, service: hardened }
+    profiles: [monitoring]
+    image: docker.io/grafana/grafana:12.1.1
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /etc/grafana/dashboards/cgroups.json
+    volumes:
+      - ./config/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./config/grafana/dashboards:/etc/grafana/dashboards:ro
+      - grafana_data:/var/lib/grafana
+    # Publié sur 127.0.0.1 uniquement (un réseau internal ne permet pas de publier un port)
+    ports:
+      - "127.0.0.1:3000:3000"
+    networks: [monitoring, edge]
+    deploy:
+      resources:
+        limits: { cpus: "0.50", memory: 256M, pids: 128 }
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:3000/api/health"]
+    depends_on:
+      prometheus: { condition: service_healthy }

@@ -1,0 +1,20 @@
+# Collecte des métriques (toutes les 15 s)
+global:
+  scrape_interval: 15s
+
+scrape_configs:
+  # Consommation de chaque conteneur, lue dans ses cgroups
+  - job_name: cadvisor
+    static_configs:
+      - targets: ["cadvisor:8080"]
+
+  # API Stoat : requêtes HTTP (rocket_prometheus). Joint en interne sur le réseau
+  # backend ; la route /api/metrics est bloquée côté public par Caddy.
+  - job_name: stoat-api
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["api:14702"]
+
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]

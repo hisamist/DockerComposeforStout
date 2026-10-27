@@ -1,0 +1,72 @@
+# =============================================================================
+#  Mode "BACKEND DISTANT" : le client web et le bridge de ce projet utilisent
+#  un backend Stoat qui tourne sur un autre PC (par exemple via WireGuard).
+#
+#    docker compose -f docker-compose.yaml -f docker-compose.remote.yaml \
+#      --env-file .env --env-file .env.remote up -d
+#
+#  - Projet séparé (projetbridge-remote) : conteneurs, réseaux et volumes distincts,
+#    le mode normal n'est pas touché et peut tourner en même temps.
+#  - Le backend et les bases locaux ne démarrent pas (profil "local-backend").
+#  - Seuls web, caddy et stoatcord-bot démarrent.
+#
+#  IMPORTANT : le client web ne reçoit que l'adresse de l'API. Les adresses
+#  WebSocket, fichiers, proxy et GIF lui sont données par le backend distant
+#  lui-même : celui-ci doit annoncer des URLs joignables (ex. ws://10.8.0.1:14703),
+#  sinon la connexion fonctionne mais les messages en direct et les envois échouent.
+# =============================================================================
+name: projetbridge-remote
+
+services:
+  # --- Backend et bases locaux désactivés (ils sont sur l'autre PC) ---
+  database: { profiles: [local-backend] }
+  redis: { profiles: [local-backend] }
+  rabbit: { profiles: [local-backend] }
+  minio: { profiles: [local-backend] }
+  createbuckets: { profiles: [local-backend] }
+  api: { profiles: [local-backend] }
+  api-loopback: { profiles: [local-backend] }
+  events: { profiles: [local-backend] }
+  autumn: { profiles: [local-backend] }
+  january: { profiles: [local-backend] }
+  gifbox: { profiles: [local-backend] }
+  crond: { profiles: [local-backend] }
+  pushd: { profiles: [local-backend] }
+  voice-ingress: { profiles: [local-backend] }
+  livekit: { profiles: [local-backend] }
+
+  # --- Client web : pointe vers l'API distante ---
+  web:
+    environment:
+      VITE_HOST: ${REMOTE_WEB_HOST:-localhost:8080}
+      VITE_API_URL: ${STOAT_REMOTE_API_URL:?définir STOAT_REMOTE_API_URL dans .env.remote}
+      VITE_DEV_GIFBOX_URL: ${STOAT_REMOTE_GIFBOX_URL:-}
+
+  # --- Caddy : ne sert que le client web, sur un port distinct du mode normal ---
+  caddy:
+    environment:
+      SITE_ADDRESS: ":80"
+      PUBLIC_URL: ${STOAT_REMOTE_API_URL}
+    ports: !override
+      - "${REMOTE_HTTP_PORT:-8080}:80"
+    depends_on: !override
+      web: { condition: service_healthy }
+
+  # --- Bridge : REST et WebSocket du backend distant, tokens dédiés ---
+  stoatcord-bot:
+    environment:
+      STOAT_API_BASE: ${STOAT_REMOTE_API_URL:?définir STOAT_REMOTE_API_URL dans .env.remote}
+      STOAT_WS_URL: ${STOAT_REMOTE_WS_URL:?définir STOAT_REMOTE_WS_URL dans .env.remote}
+      STOAT_CDN_URL: ${STOAT_REMOTE_AUTUMN_URL:?définir STOAT_REMOTE_AUTUMN_URL dans .env.remote}
+      STOAT_AUTUMN_URL: ${STOAT_REMOTE_AUTUMN_URL}
+    depends_on: !reset {}
+
+# Le backend distant a sa propre base (comptes, serveurs, IDs de salons) :
+# le bot Stoat doit être créé SUR CETTE INSTANCE, et le bot Discord doit être
+# différent du mode normal (deux connexions avec le même token traiteraient
+# chaque message et chaque /link deux fois).
+secrets:
+  discord_token:
+    file: ./secrets/remote/discord_token.txt
+  stoat_token:
+    file: ./secrets/remote/stoat_token.txt

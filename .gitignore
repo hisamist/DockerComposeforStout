@@ -1,0 +1,9 @@
+.env
+.env.remote
+data/
+secrets/
+
+# Sources amont, récupérées par setup.sh à une version figée
+stoat/backend/
+stoat/web/
+bot/stoatcord-bot/

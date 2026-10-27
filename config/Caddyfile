@@ -1,0 +1,73 @@
+# =============================================================================
+#  Reverse proxy : point d'entrée unique de l'instance Stoat.
+#  {$SITE_ADDRESS} vient de docker-compose.yaml :
+#    http://stoat.localhost   -> HTTP en local
+#    chat.mondomaine.fr        -> HTTPS automatique (Let's Encrypt)
+# =============================================================================
+{$SITE_ADDRESS} {
+	encode zstd gzip
+
+	header {
+		-Server
+		X-Content-Type-Options nosniff
+		Referrer-Policy strict-origin-when-cross-origin
+	}
+
+	# Découverte de l'instance par les clients (remplace le fichier stoat.json)
+	handle /.well-known/stoat {
+		header Content-Type application/json
+		header Access-Control-Allow-Origin *
+		respond `{"api":"{$PUBLIC_URL}/api"}` 200
+	}
+
+	# Métriques Prometheus de l'API : réservées au réseau interne (Prometheus les lit
+	# directement sur api:14702), jamais exposées publiquement.
+	handle /api/metrics* {
+		respond 404
+	}
+
+	handle_path /api* {
+		reverse_proxy api:14702 {
+			header_down Location "^/" "/api/"
+		}
+	}
+
+	handle_path /ws* {
+		reverse_proxy events:14703
+	}
+
+	handle_path /autumn* {
+		reverse_proxy autumn:14704 {
+			header_down Location "^/" "/autumn/"
+		}
+	}
+
+	handle_path /january* {
+		reverse_proxy january:14705 {
+			header_down Location "^/" "/january/"
+		}
+	}
+
+	handle_path /gifbox* {
+		reverse_proxy gifbox:14706 {
+			header_down Location "^/" "/gifbox/"
+		}
+	}
+
+	handle_path /livekit* {
+		reverse_proxy livekit:7880 {
+			header_down Location "^/" "/livekit/"
+		}
+	}
+
+	handle_path /ingress* {
+		reverse_proxy voice-ingress:8500 {
+			header_down Location "^/" "/ingress/"
+		}
+	}
+
+	# Tout le reste : client web
+	handle {
+		reverse_proxy web:5000
+	}
+}

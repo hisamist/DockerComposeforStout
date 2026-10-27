@@ -1,0 +1,82 @@
+# =============================================================================
+#  Socles communs, réutilisés par les modules via `extends:`
+#  Ces services "abstraits" ne sont jamais démarrés : ce fichier n'est pas inclus
+#  par docker-compose.yaml, il est seulement référencé par extends.
+#  Les chemins relatifs de ce fichier partent de ./compose/ (d'où les ../).
+#  Fusion : les clés du service final complètent ou remplacent celles du socle
+#  (build.target, healthcheck.test, deploy.resources... fusionnés en profondeur).
+# =============================================================================
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+# Rythme commun des sondes ; chaque service ne fournit que son "test"
+x-healthcheck: &healthcheck
+  interval: 10s
+  timeout: 5s
+  retries: 5
+  start_period: 15s
+  # Pendant start_period, sonde toutes les 2 s : démarrage en cascade plus rapide
+  start_interval: 2s
+
+x-base: &base
+  restart: unless-stopped
+  logging: *logging
+  security_opt:
+    - no-new-privileges:true
+  healthcheck: *healthcheck
+
+x-hardened: &hardened
+  <<: *base
+  cap_drop: [ALL]
+  read_only: true
+  tmpfs:
+    - /tmp:size=64m
+
+services:
+  # Socle de tout service : redémarrage, rotation des logs, pas d'élévation de privilèges
+  base:
+    <<: *base
+
+  # Service sans état : aucune capacité Linux, système de fichiers en lecture seule
+  hardened:
+    <<: *hardened
+
+  # Service du backend Stoat (Rust) compilé depuis stoat/backend.
+  # Toute la configuration propre à l'instance arrive par REVOLT__SECTION__CLE :
+  # Revolt.toml ne contient ni URL ni mot de passe.
+  stoat:
+    <<: *hardened
+    build:
+      context: ../stoat/backend
+      dockerfile: ../../docker/stoat-backend/Dockerfile
+    environment:
+      # URLs publiques de l'instance
+      REVOLT__HOSTS__APP: ${STOAT_PUBLIC_URL}
+      REVOLT__HOSTS__API: ${STOAT_PUBLIC_URL}/api
+      REVOLT__HOSTS__EVENTS: ${STOAT_PUBLIC_WS}/ws
+      REVOLT__HOSTS__AUTUMN: ${STOAT_PUBLIC_URL}/autumn
+      REVOLT__HOSTS__JANUARY: ${STOAT_PUBLIC_URL}/january
+      REVOLT__HOSTS__GIFBOX: ${STOAT_PUBLIC_URL}/gifbox
+      REVOLT__HOSTS__LIVEKIT__WORLDWIDE: ${STOAT_PUBLIC_WS}/livekit
+      # Bases de données (comptes applicatifs à droits limités)
+      REVOLT__DATABASE__MONGODB: mongodb://${MONGO_APP_USER}:${MONGO_APP_PASSWORD}@database:27017/?authSource=revolt
+      REVOLT__DATABASE__REDIS: redis://redis:6379/
+      REVOLT__RABBIT__USERNAME: ${RABBIT_USER}
+      REVOLT__RABBIT__PASSWORD: ${RABBIT_PASSWORD}
+      REVOLT__FILES__S3__ACCESS_KEY_ID: ${MINIO_APP_USER}
+      REVOLT__FILES__S3__SECRET_ACCESS_KEY: ${MINIO_APP_PASSWORD}
+      # Secrets internes (chiffrement des fichiers, notifications, LiveKit)
+      REVOLT__FILES__ENCRYPTION_KEY: ${STOAT_FILES_ENCRYPTION_KEY}
+      REVOLT__PUSHD__VAPID__PRIVATE_KEY: ${STOAT_VAPID_PRIVATE_KEY}
+      REVOLT__PUSHD__VAPID__PUBLIC_KEY: ${STOAT_VAPID_PUBLIC_KEY}
+      REVOLT__API__LIVEKIT__NODES__WORLDWIDE__KEY: stoat
+      REVOLT__API__LIVEKIT__NODES__WORLDWIDE__SECRET: ${LIVEKIT_SECRET}
+    volumes:
+      - type: bind
+        source: ../config/Revolt.toml
+        target: /Revolt.toml
+        read_only: true

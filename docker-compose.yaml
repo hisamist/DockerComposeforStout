@@ -1,0 +1,60 @@
+# =============================================================================
+#  projetBridge : Stoat (ex-Revolt) auto-hébergé + bridge Discord
+#
+#  Fichier d'assemblage : chaque domaine vit dans son module (./compose/),
+#  les ressources partagées (réseaux, secrets, volumes) sont déclarées ici.
+#
+#    Production       docker compose -f docker-compose.yaml up -d
+#    Développement    docker compose up --watch      (+ docker-compose.override.yaml)
+#    Supervision      ajouter --profile monitoring  ->  Grafana http://127.0.0.1:3000
+# =============================================================================
+name: projetbridge
+
+# project_directory "." : dans chaque module, les chemins relatifs partent de la racine
+include:
+  - path: compose/data.yaml          # MongoDB, Valkey, RabbitMQ, MinIO
+    project_directory: .
+  - path: compose/stoat.yaml         # backend Rust, LiveKit, client web, Caddy
+    project_directory: .
+  - path: compose/bridge.yaml        # passerelle Discord <-> Stoat
+    project_directory: .
+  - path: compose/monitoring.yaml    # cAdvisor, Prometheus, Grafana (profil "monitoring")
+    project_directory: .
+# compose/common.yaml n'est pas inclus : il contient les socles utilisés via `extends:`
+
+# -----------------------------------------------------------------------------
+#  Réseaux : segmentation en zones
+# -----------------------------------------------------------------------------
+networks:
+  # Zone exposée : Caddy et les services qu'il publie
+  edge: {}
+  # Communication interne entre services applicatifs (pas d'accès Internet)
+  backend:
+    internal: true
+  # Bases de données : joignables uniquement par les services qui en ont besoin
+  data:
+    internal: true
+  # Sortie Internet pour les services qui en ont besoin (Discord, Web Push)
+  egress: {}
+  # Supervision : cAdvisor, Prometheus et Grafana entre eux, sans accès Internet
+  monitoring:
+    internal: true
+
+# -----------------------------------------------------------------------------
+#  Secrets (montés dans /run/secrets, invisibles dans "docker inspect")
+#  Source "file" : obligatoire pour un conteneur read_only (cas du bridge)
+# -----------------------------------------------------------------------------
+secrets:
+  mongo_root_password:
+    environment: MONGO_ROOT_PASSWORD
+  discord_token:
+    file: ./secrets/discord_token.txt
+  stoat_token:
+    file: ./secrets/stoat_token.txt
+  bridge_api_key:
+    file: ./secrets/bridge_api_key.txt
+
+volumes:
+  bridge_data:
+  prometheus_data:
+  grafana_data:
