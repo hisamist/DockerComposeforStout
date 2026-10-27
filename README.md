@@ -293,10 +293,24 @@ docker compose -f docker-compose.yaml up -d --build --scale stoatcord-bot=0
 6. Inviter le bot Discord avec les scopes `bot` et `applications.commands` et les permissions *Send Messages*, *Manage Webhooks*, *Read Message History* et *Attach Files*. Ajouter le bot Stoat au serveur Stoat, avec la permission **Masquerade**.
 7. Sur Discord, dans le salon à relier, taper `/link stoat_channel_id:<ID du salon Stoat>`.
 
-### Commandes utiles
+### Commandes utiles : `make`
+Le `Makefile` regroupe toutes les commandes. `make help` en affiche la liste.
+
+| Commande | Action |
+|---|---|
+| `make build` | Compile les images (backend Rust d'abord, puis le reste depuis le cache) |
+| `make prod` / `make up` / `make dev` | Production / développement en arrière-plan / développement avec watch |
+| `make monitoring` / `make tools` | Ajoute la supervision Grafana / mongo-express |
+| `make local` / `make remote` | Bascule le bridge entre backend local et distant, **un seul bridge à la fois** |
+| `make ps`, `make logs s=api`, `make restart s=web` | Suivi d'un service |
+| `make check` | Valide les 3 configurations Compose et **teste l'isolation réseau** (API joignable, bases et Internet bloqués) |
+| `make scan` | Vulnérabilités HIGH/CRITICAL de nos images (Trivy) |
+| `make down` / `make down-remote` | Arrêt (données conservées) |
+
+- **Portable.** Sous Windows, GNU make exécute les recettes avec `cmd.exe`. Elles ne contiennent donc que des commandes `docker` simples, sans syntaxe bash. Installation : `winget install ezwinports.make`.
+- **Sans `make`.** `.\switch.ps1 local|remote` (PowerShell) ou `./switch.sh local|remote` font la bascule du bridge.
+
 ```bash
-docker compose ps                                  # état et santé
-docker compose logs -f stoatcord-bot               # logs du bridge
 docker stats                                       # consommation vs limites cgroup
 docker compose -f docker-compose.yaml config       # configuration finale (fragments résolus)
 ```
